@@ -5,6 +5,7 @@
 
 mod accessories;
 mod badges;
+mod call_timer;
 mod context_menu;
 mod discord;
 mod emoji;
@@ -229,6 +230,10 @@ impl Platform for Desktop {
       // SAFETY: every registry handler takes the store state first, and this
       // runs inside one.
       unsafe { staff::apply(store) };
+   }
+
+   fn observe_gateway(&self, event: &str, data: &str) {
+      call_timer::observe(event, data);
    }
 
    fn started(&self, _first_run: bool, _plugins: &[String]) {

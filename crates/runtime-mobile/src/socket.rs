@@ -1,6 +1,5 @@
-//! `READY`, which Phoenix's gateway session applies itself and never passes
-//! through the registry. It is read off the host's `@ws` events, where Java
-//! hands Rust each inflated gateway message.
+//! Gateway messages read from the host's `@ws` events. Phoenix applies
+//! `READY` in the gateway session without passing it through the registry.
 
 use std::sync::OnceLock;
 
@@ -21,11 +20,13 @@ use crate::{
       Sink,
    },
    host::Event,
+   patches::call_timer,
 };
 
-/// Discord's gateway JSON is compact, so a READY message holds these bytes
-/// and every other frame is skipped with one scan.
+/// Discord's compact gateway JSON lets us skip unrelated frames before
+/// decoding.
 const READY_TAG: &[u8] = br#""t":"READY""#;
+const VOICE_STATE_TAG: &[u8] = br#""t":"VOICE_STATE_UPDATE""#;
 
 #[derive(Deserialize)]
 struct Message<'a> {
@@ -45,10 +46,8 @@ impl Sink for Socket {
    fn dispatch(&self, frame: &[u8]) -> Action {
       static READY: OnceLock<Option<EventId>> = OnceLock::new();
 
-      let Some(ready) = *READY.get_or_init(|| gateway::event("READY")) else {
-         return Action::Pass;
-      };
-      if !gateway::listened(ready) || memmem::find(frame, READY_TAG).is_none() {
+      if memmem::find(frame, READY_TAG).is_none() && memmem::find(frame, VOICE_STATE_TAG).is_none()
+      {
          return Action::Pass;
       }
       let Ok(items) = decode_dispatch(frame) else {
@@ -66,7 +65,17 @@ impl Sink for Socket {
                return None;
             }
             let message = serde_json::from_slice::<Message<'_>>(body).ok()?;
-            let data = message.d.filter(|_| message.t == Some("READY"))?.get();
+            let data = message.d?.get();
+            match message.t? {
+               "READY" => call_timer::ready(data),
+               "VOICE_STATE_UPDATE" => {
+                  call_timer::voice_state(data);
+                  return None;
+               },
+               _ => return None,
+            }
+            let ready = (*READY.get_or_init(|| gateway::event("READY")))
+               .filter(|id| gateway::listened(*id))?;
             let json = gateway::intercept(ready, data)?;
             let start = data.as_ptr().addr() - body.as_ptr().addr();
             let head = &frame[item.offset..item.offset + item.len - body.len()];

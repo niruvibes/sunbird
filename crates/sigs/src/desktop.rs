@@ -1986,23 +1986,30 @@ fn string_leas(image: &Image<'_>, needles: &[&[u8]]) -> HashMap<usize, Vec<usize
    lea_refs_many(image, &targets)
 }
 
-/// What the native modal overlay builds and hooks.
-///
-/// `Workspace::render_overlays`, the `mana_html::hosted::modal::Modal`
-/// builders, `Vec<AnyElement>::push`, `Div::id` (required for mouse-wheel
-/// scrolling), GPUI's `WM_USER+5` force-redraw validation-number offset, and
-/// the backdrop's click-outside wiring.
-pub struct Modal {
-   pub overlay_render:           usize,
+/// Workspace's native overlay vector and the GPUI window redraw token.
+pub struct WorkspaceOverlay {
+   pub render:                   usize,
    pub vec_push_any:             usize,
-   pub modal_new:                usize,
-   pub modal_into_any:           usize,
-   pub modal_child_div:          usize,
-   pub modal_footer_button:      usize,
-   pub div_id:                   usize,
    pub window_validation_offset: usize,
-   pub dismiss:                  Dismiss,
-   pub layout:                   ModalLayout,
+   end:                          usize,
+   modal_new:                    usize,
+   modal_into_any:               usize,
+   modal_child_div:              usize,
+   modal_footer_button:          usize,
+   modal_size:                   usize,
+   children:                     usize,
+   footer:                       usize,
+}
+
+/// The builders and layout for the native Mana modal.
+pub struct Modal {
+   pub modal_new:           usize,
+   pub modal_into_any:      usize,
+   pub modal_child_div:     usize,
+   pub modal_footer_button: usize,
+   pub div_id:              usize,
+   pub dismiss:             Dismiss,
+   pub layout:              ModalLayout,
 }
 
 /// `mana_html::hosted::modal::Modal`.
@@ -2043,9 +2050,9 @@ pub struct Dismiss {
 /// `WM_GPUI_FORCE_UPDATE_WINDOW` (`0x405`) validation offset.
 #[expect(
    clippy::too_many_lines,
-   reason = "one locator per modal builder, cross-checked"
+   reason = "cross-checks the overlay's element vector ABI"
 )]
-pub fn modal(image: &Image<'_>, div_into_any: usize, div: &DivLayout) -> Found<Modal> {
+pub fn workspace_overlay(image: &Image<'_>, div_into_any: usize) -> Found<WorkspaceOverlay> {
    // `Modal::child::<Div>` and `Modal::footer_button` push an `AnyElement`
    // into one of the `Modal`'s `Vec`s (`lea arg0, [modal + vec]; lea arg1,
    // [element]; call push`) and return it by copy (`mov ecx, size`), Win64
@@ -2058,7 +2065,6 @@ pub fn modal(image: &Image<'_>, div_into_any: usize, div: &DivLayout) -> Found<M
       b"mana-modal",
       MODAL_TYPE,
       BUTTON_TYPE,
-      b"game-server-shop-carousel",
    ]);
    let leas_of = |addr: usize| leas.get(&addr).cloned().unwrap_or_default();
 
@@ -2162,6 +2168,28 @@ pub fn modal(image: &Image<'_>, div_into_any: usize, div: &DivLayout) -> Found<M
       );
    }
 
+   let window_validation_offset = match Abi::of(image) {
+      Abi::Win64 => window_validation(image)?,
+      Abi::SysV => 0,
+   };
+   Ok(WorkspaceOverlay {
+      render: overlay_render,
+      vec_push_any,
+      window_validation_offset,
+      end: overlay_end,
+      modal_new,
+      modal_into_any,
+      modal_child_div,
+      modal_footer_button,
+      modal_size,
+      children,
+      footer,
+   })
+}
+
+/// Locates the remaining Mana modal controls and validates their layouts.
+pub fn modal(image: &Image<'_>, overlay: &WorkspaceOverlay, div: &DivLayout) -> Found<Modal> {
+   let leas = string_leas(image, &[b"game-server-shop-carousel"]);
    // `Div::id` is the first call after `lea` of `"game-server-shop-carousel"`,
    // checking `ElementId::None` in `Interactivity` (`cmp byte ptr [rcx +
    // disp32], 0xff`).
@@ -2171,8 +2199,11 @@ pub fn modal(image: &Image<'_>, div_into_any: usize, div: &DivLayout) -> Found<M
    )?;
    // `Div::id(div, id)` takes the id string as its third argument.
    let abi = Abi::of(image);
-   let carousel_leas: Vec<usize> = leas_of(carousel)
+   let carousel_leas: Vec<usize> = leas
+      .get(&carousel)
       .into_iter()
+      .flatten()
+      .copied()
       .filter(|&lea| image.read(lea, 3) == Some(&lea_rip(abi.arg(2))[..]))
       .collect();
    let carousel_lea = one("game-server-shop-carousel load", &carousel_leas)?;
@@ -2189,28 +2220,20 @@ pub fn modal(image: &Image<'_>, div_into_any: usize, div: &DivLayout) -> Found<M
       return Err("Div::id element_id offset check failed".to_owned());
    }
 
-   let window_validation_offset = match abi {
-      Abi::Win64 => window_validation(image)?,
-      Abi::SysV => 0,
-   };
-
    Ok(Modal {
-      overlay_render,
-      vec_push_any,
-      modal_new,
-      modal_into_any,
-      modal_child_div,
-      modal_footer_button,
+      modal_new: overlay.modal_new,
+      modal_into_any: overlay.modal_into_any,
+      modal_child_div: overlay.modal_child_div,
+      modal_footer_button: overlay.modal_footer_button,
       div_id,
-      window_validation_offset,
-      dismiss: backdrop_dismiss(image, overlay_render, overlay_end, div)?,
+      dismiss: backdrop_dismiss(image, overlay.render, overlay.end, div)?,
       layout: ModalLayout {
-         size: modal_size,
-         children,
-         footer,
-         subtitle: modal_subtitle(image, modal_size)?,
-         on_close: modal_on_close(image, modal_size)?,
-         scale: modal_scale(image, modal_new, modal_size)?,
+         size:     overlay.modal_size,
+         children: overlay.children,
+         footer:   overlay.footer,
+         subtitle: modal_subtitle(image, overlay.modal_size)?,
+         on_close: modal_on_close(image, overlay.modal_size)?,
+         scale:    modal_scale(image, overlay.modal_new, overlay.modal_size)?,
       },
    })
 }

@@ -304,6 +304,9 @@ unsafe extern "C" fn detour(
       event: name,
       bytes: data.map_or(0, str::len),
    });
+   if let (Some(platform), Some(data)) = (crate::platform(), data) {
+      platform.observe_gateway(name, data);
+   }
    let original = gateway.originals[id.index()];
    // SAFETY: forwarded to the registry's own handler unchanged or with
    // replaced data.

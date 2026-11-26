@@ -47,6 +47,7 @@ use crate::{
       self,
       RenderedAccessory,
    },
+   call_timer,
    context_menu::{
       self,
       ActionMeta,
@@ -626,6 +627,7 @@ pub fn desktop_patch_api<'js>(
 
 pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    let ui = Object::new(ctx.clone())?;
+   call_timer::bind(ctx, &ui, plugin)?;
    ui.set(
       "toast",
       Function::new(ctx.clone(), |message: String| {

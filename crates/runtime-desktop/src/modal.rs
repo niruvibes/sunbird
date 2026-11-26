@@ -297,7 +297,6 @@ type ListenerPushFn = unsafe extern "C" fn(*mut c_void, *mut u8, *const RcFnVtbl
 type IsHoveredFn = unsafe extern "C" fn(*const c_void, *const c_void) -> bool;
 
 struct ModalSymbols {
-   vec_push_any:        VecPushAnyFn,
    modal_new:           ModalNewFn,
    modal_into_any:      ModalIntoAnyFn,
    modal_child_div:     ModalChildDivFn,
@@ -342,6 +341,7 @@ unsafe impl Send for DismissSymbols {}
 unsafe impl Sync for DismissSymbols {}
 
 static ORIG_OVERLAY_RENDER: OnceLock<OverlayRenderFn> = OnceLock::new();
+static OVERLAY_PUSH_ANY: OnceLock<VecPushAnyFn> = OnceLock::new();
 
 /// The Settings layer's render, `fn(sret, layer, window, cx) -> sret`.
 type SettingsLayerFn = unsafe extern "C" fn(
@@ -924,6 +924,10 @@ pub fn force_redraw() {
    Os::force_redraw(WINDOW_VAL_OFFSET.load(Ordering::Acquire));
 }
 
+pub fn workspace_overlay_ready() -> bool {
+   ORIG_OVERLAY_RENDER.get().is_some()
+}
+
 // ---------------------------------------------------------------------------
 // Installation (`DllMain` / `crate::prepare`)
 // ---------------------------------------------------------------------------
@@ -940,14 +944,46 @@ pub fn install(image: &Image<'static>) {
       log::warn!("desktop modal: Div::child(AnyElement) unavailable, skipping");
       return;
    }
-   let found = match desktop::modal(image, div_into_any, &gpui_layout.div) {
+   let overlay = match desktop::workspace_overlay(image, div_into_any) {
+      Ok(overlay) => overlay,
+      Err(err) => {
+         log::warn!("desktop overlay: {err}");
+         return;
+      },
+   };
+   let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).frame;
+   // SAFETY: installed before Discord's threads run, with the decoded
+   // Workspace::render_overlays ABI and the checked element vector pusher.
+   let trampoline = match unsafe {
+      image.hook_entry(
+         overlay.render,
+         pro.pattern,
+         pro.len,
+         overlay_render_detour as *const () as usize,
+      )
+   } {
+      Ok(trampoline) => trampoline,
+      Err(err) => {
+         log::warn!("desktop overlay: hook failed: {err}");
+         return;
+      },
+   };
+   // SAFETY: the trampoline replays the original prologue.
+   let orig = unsafe { std::mem::transmute::<usize, OverlayRenderFn>(trampoline) };
+   // SAFETY: the locator matched the vector's own push function.
+   let push = unsafe { std::mem::transmute::<usize, VecPushAnyFn>(overlay.vec_push_any) };
+   let _ = OVERLAY_PUSH_ANY.set(push);
+   let _ = ORIG_OVERLAY_RENDER.set(orig);
+   WINDOW_VAL_OFFSET.store(overlay.window_validation_offset, Ordering::Release);
+   log::info!("desktop overlay: hooked Workspace::render_overlays");
+
+   let found = match desktop::modal(image, &overlay, &gpui_layout.div) {
       Ok(m) => m,
       Err(err) => {
          log::warn!("desktop modal: {err}, native modals disabled");
          return;
       },
    };
-   WINDOW_VAL_OFFSET.store(found.window_validation_offset, Ordering::Release);
    // SAFETY: resolved and shape-checked against `Discord.exe` by `sigs`.
    let _ = DISMISS_SYM.set(unsafe {
       DismissSymbols {
@@ -966,7 +1002,6 @@ pub fn install(image: &Image<'static>) {
    // SAFETY: resolved and layout-verified against `Discord.exe`.
    let modal_sym = unsafe {
       ModalSymbols {
-         vec_push_any:        std::mem::transmute::<usize, VecPushAnyFn>(found.vec_push_any),
          modal_new:           std::mem::transmute::<usize, ModalNewFn>(found.modal_new),
          modal_into_any:      std::mem::transmute::<usize, ModalIntoAnyFn>(found.modal_into_any),
          modal_child_div:     std::mem::transmute::<usize, ModalChildDivFn>(found.modal_child_div),
@@ -1021,35 +1056,8 @@ pub fn install(image: &Image<'static>) {
       },
    }
 
-   let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).frame;
-   // SAFETY: runs from `prepare` before Discord threads execute;
-   // `overlay_render_detour` matches `Workspace::render_overlays`'s 5-arg sret
-   // ABI returning `Vec<AnyElement>`.
-   let trampoline = match unsafe {
-      image.hook_entry(
-         found.overlay_render,
-         pro.pattern,
-         pro.len,
-         overlay_render_detour as *const () as usize,
-      )
-   } {
-      Ok(trampoline) => trampoline,
-      Err(err) => {
-         log::warn!("desktop modal: overlay render hook failed: {err}");
-         return;
-      },
-   };
-   // SAFETY: `trampoline` replays the 19-byte prologue and jumps to `+19`.
-   let orig = unsafe { std::mem::transmute::<usize, OverlayRenderFn>(trampoline) };
-   let _ = ORIG_OVERLAY_RENDER.set(orig);
    install_settings_layer(image, pro);
-   log::info!(
-      "desktop modal: hooked Workspace::render_overlays @ {:#x} (push={:#x}, val +{:#x}) {:x?}",
-      found.overlay_render,
-      found.vec_push_any,
-      found.window_validation_offset,
-      found.layout,
-   );
+   log::info!("desktop modal: enabled {:x?}", found.layout);
 }
 
 /// Hooks the Settings layer's render, so modals opened over Settings draw
@@ -1263,6 +1271,14 @@ unsafe extern "C" fn overlay_render_detour(
    };
    // SAFETY: always render Discord's own overlay stack first.
    let out = unsafe { orig(sret, workspace, arg3, window, cx) };
+   if let Some(push) = OVERLAY_PUSH_ANY.get().copied().filter(|_| !sret.is_null()) {
+      let _ = std::panic::catch_unwind(|| {
+         if let Some(timer) = crate::call_timer::render() {
+            // SAFETY: the original renderer initialized `sret`.
+            unsafe { push_overlay(sret, push, timer) };
+         }
+      });
+   }
    if !MODAL_OPEN.load(Ordering::Acquire) {
       IN_SETTINGS.store(false, Ordering::Release);
       return out;
@@ -1293,22 +1309,24 @@ unsafe extern "C" fn overlay_render_detour(
    let _ = std::panic::catch_unwind(|| {
       // SAFETY: `[cx]` is `*mut App` inside `Context<Workspace>`.
       let app = unsafe { *(cx.cast::<*mut c_void>()) };
-      let Some(msym) = MODAL_SYM.get() else {
+      let Some(push) = OVERLAY_PUSH_ANY.get().copied() else {
          return;
       };
       let Some(scrim) = build_overlay(window, app) else {
          return;
       };
-      let mut scrim_any = MaybeUninit::<RawAnyElement>::uninit();
-      gpui::write_any(scrim, scrim_any.as_mut_ptr());
-      // SAFETY: `scrim_any` was initialized by `div_into_any` and
-      // `vec_push_any` is Discord's own `Vec::<AnyElement>::push`.
-      unsafe {
-         let mut scrim_any = scrim_any.assume_init();
-         (msym.vec_push_any)(sret, &raw mut scrim_any);
-      }
+      // SAFETY: the original renderer initialized `sret`.
+      unsafe { push_overlay(sret, push, scrim) };
    });
    out
+}
+
+/// Appends an overlay to the live vector returned by Workspace.
+unsafe fn push_overlay(sret: *mut RawVecAny, push: VecPushAnyFn, div: RawDiv) {
+   let mut element = MaybeUninit::<RawAnyElement>::uninit();
+   gpui::write_any(div, element.as_mut_ptr());
+   // SAFETY: `write_any` initialized the element with Discord's own builder.
+   unsafe { push(sret, element.as_mut_ptr()) };
 }
 
 unsafe extern "C" fn settings_layer_detour(

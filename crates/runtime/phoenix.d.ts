@@ -1303,6 +1303,8 @@ declare namespace Phoenix {
     close(): void;
   }
 
+  type CallTimerFormat = "stopwatch" | "human";
+
   interface NotifyOptions {
     title: string;
     body?: string;
@@ -1320,6 +1322,9 @@ declare namespace Phoenix {
   /// land a moment after the screen they belong to. Everything goes away when the plugin is
   /// turned off.
   interface Ui {
+    /// Shows the elapsed time of this client's voice session when supported.
+    /// Calling again changes the format. Unloading the plugin removes the timer.
+    setCallTimer?(format: CallTimerFormat): void;
     /// In the chat header, left of search.
     addHeaderButton(options: ButtonOptions): ButtonRemover;
     /// In the message box, left of the emoji button.

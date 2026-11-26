@@ -17,6 +17,7 @@ use rquickjs::{
 
 use crate::{
    accessories,
+   call_timer,
    context_menu,
    emoji,
    js::ui::{
@@ -48,6 +49,7 @@ unsafe impl<'js> JsLifetime<'js> for Desktop<'js> {
 /// Drops the accessories, context menu actions, open page callbacks, and emoji
 /// pick handlers `name` registered and redraws Discord without them.
 pub fn unload(ctx: &Ctx<'_>, name: &str) {
+   call_timer::clear_format(name);
    let Some(registry) = ctx.userdata::<Desktop<'_>>() else {
       return;
    };

@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use phoenix_runtime::{
+   call_timer::Format,
    js::{
       Engine,
       background::{
@@ -45,6 +46,7 @@ use crate::{
       Rendered,
       TintChange,
       UiContext,
+      call_timer,
       targets::Target,
    },
 };
@@ -340,6 +342,16 @@ pub fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'
    add_view_queries(ctx, &ui)?;
    add_mount(ctx, plugin, &ui)?;
    add_notify(ctx, plugin, &ui)?;
+   let owner = plugin.to_owned();
+   ui.set(
+      "setCallTimer",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, value: String| {
+         let format = Format::from_name(&value)
+            .ok_or_else(|| Exception::throw_type(&ctx, "unknown call timer format"))?;
+         call_timer::set_format(&owner, format);
+         Ok::<(), rquickjs::Error>(())
+      })?,
+   )?;
    ui.set(
       "copy",
       Function::new(ctx.clone(), |text: String| {

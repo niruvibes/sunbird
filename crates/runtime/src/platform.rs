@@ -86,6 +86,10 @@ pub trait Platform: Sync {
    /// Runs first in every gateway handler call, with the store it received.
    fn gateway(&self, store: *mut c_void);
 
+   /// Observes a gateway event as it arrived, before plugins can replace its
+   /// payload.
+   fn observe_gateway(&self, _event: &str, _data: &str) {}
+
    /// A plugin hook changed the text of a message from `original` to `shown`.
    fn rewritten(&self, _original: String, _shown: String) {}
 

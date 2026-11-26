@@ -168,6 +168,7 @@ pub enum Job {
    DismissBanner(u32),
    /// User tapped in-app notification banner `id`.
    BannerPressed(u32),
+   RefreshCallTimer,
    /// Mount a raw JS-built subtree onto `parent` (or `mirror.root()` when
    /// None).
    Mount {
@@ -284,6 +285,7 @@ pub fn run(job: Job) -> Vec<Op> {
       Job::FlushBanners => patches().flush_banners(),
       Job::DismissBanner(id) => banners::dismiss(id),
       Job::BannerPressed(id) => banners::pressed(id),
+      Job::RefreshCallTimer => patches().refresh_call_timer(),
       Job::Mount {
          id,
          parent,

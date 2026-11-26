@@ -270,27 +270,39 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                )
             }),
          );
+         let overlay = gpui
+            .as_ref()
+            .map_err(|_| "needs the builders".to_owned())
+            .and_then(|gpui| desktop::workspace_overlay(image, gpui.div_into_any));
+         report(
+            "workspace overlay",
+            overlay.as_ref().map_err(Clone::clone).map(|overlay| {
+               format!(
+                  "{} (push {}, val +{:#x})",
+                  at(overlay.render),
+                  at(overlay.vec_push_any),
+                  overlay.window_validation_offset,
+               )
+            }),
+         );
          report(
             "native modal",
-            gpui
+            overlay
                .as_ref()
-               .map_err(|_| "needs the builders".to_owned())
-               .and_then(|gpui| {
+               .map_err(|_| "needs the workspace overlay".to_owned())
+               .and_then(|overlay| {
                   let layouts = layouts
                      .as_ref()
                      .map_err(|_| "needs the layouts".to_owned())?;
-                  desktop::modal(image, gpui.div_into_any, &layouts.div)
+                  desktop::modal(image, overlay, &layouts.div)
                })
                .map(|m| {
                   format!(
-                     "overlay={}, push={}, new={}, into_any={}, div_id={}, val=+{:#x}, \
-                      mouse_down=+{:#x}, listener_push={}, is_hovered={}, propagate=+{:#x} {:x?}",
-                     at(m.overlay_render),
-                     at(m.vec_push_any),
+                     "new={}, into_any={}, div_id={}, mouse_down=+{:#x}, listener_push={}, \
+                      is_hovered={}, propagate=+{:#x} {:x?}",
                      at(m.modal_new),
                      at(m.modal_into_any),
                      at(m.div_id),
-                     m.window_validation_offset,
                      m.dismiss.mouse_down_listeners,
                      at(m.dismiss.listener_push),
                      at(m.dismiss.hitbox_is_hovered),

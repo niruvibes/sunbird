@@ -12,6 +12,7 @@
 
 mod aids;
 pub mod banners;
+pub mod call_timer;
 pub mod commands;
 mod emoji;
 pub mod events;
@@ -349,6 +350,7 @@ enum SlotKind {
    Banner(u32),
    /// A raw JS-mounted subtree (`phoenix.ui.mount`).
    Mounted(u32),
+   CallTimer,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -433,6 +435,8 @@ struct Patches {
    banner_flush_scheduled: bool,
    /// Tap actions for currently visible in-app notification banners, by id.
    banner_actions:         HashMap<u32, BannerAction>,
+   call_timer:             phoenix_runtime::call_timer::CallTimer,
+   call_timer_tick:        Option<Instant>,
 }
 
 static ROOT_ID: AtomicI32 = AtomicI32::new(0);
@@ -483,7 +487,24 @@ pub fn start() {
    #[cfg(target_os = "android")]
    bridge::jni::attach();
    thread::spawn(move || {
-      for job in receiver {
+      loop {
+         let deadline = patches().call_timer_tick;
+         let job = if let Some(deadline) = deadline {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            if wait.is_zero() {
+               Job::RefreshCallTimer
+            } else {
+               match receiver.recv_timeout(wait) {
+                  Ok(job) => job,
+                  Err(mpsc::RecvTimeoutError::Timeout) => Job::RefreshCallTimer,
+                  Err(mpsc::RecvTimeoutError::Disconnected) => break,
+               }
+            }
+         } else if let Ok(job) = receiver.recv() {
+            job
+         } else {
+            break;
+         };
          let ops = run(job);
          if !ops.is_empty() && !bridge::apply_ops(&encode(&ops)) {
             log::warn!("patches: the UI update did not apply");
@@ -626,6 +647,9 @@ pub fn set_emoji_pickers(count: usize) {
 /// Drops everything `plugin` added.
 pub fn forget(plugin: &str) {
    let mut state = patches();
+   if state.call_timer.clear_format(plugin) {
+      queue(Job::RefreshCallTimer);
+   }
    let targets = state
       .contributions
       .iter()

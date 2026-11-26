@@ -1191,6 +1191,7 @@ pub fn wrap_with_accessories(
 // ---------------------------------------------------------------------------
 
 const DESKTOP_FULL: &[&str] = &[
+   "call-timer",
    "silent-typing",
    "message-latency",
    "message-logger",
